@@ -7,6 +7,7 @@ from openpyxl.chart.layout import Layout, ManualLayout
 from openpyxl.drawing.text import CharacterProperties
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
+from openpyxl.utils import get_column_letter 
 import tkinter as tk
 from tkinter import filedialog
 import os
@@ -29,22 +30,13 @@ root.attributes('-topmost', True)
 # --- NUEVO: PESTAÑA DE BIENVENIDA Y GUÍA (ONBOARDING) ---
 mensaje_guia = (
     "¡Bienvenido al Limpiador de Registros!\n\n"
-    "Esta herramienta procesa los datos brutos del vatímetro para extraer las métricas "
-    "eléctricas clave, generar gráficas analíticas y clasificar el equipo.\n\n"
-    "📚 A TENER EN CUENTA ANTES DE PROCEDER:\n\n"
-    "👉 1. UMBRAL DE POTENCIA (W):\n"
-    "Define el instante de inicio (t0). El algoritmo escanea el registro y establece el "
-    "punto cero en el momento exacto en el que el consumo CAE por debajo de este valor "
-    "(el programa ignorará automáticamente los 0W iniciales de la máquina apagada).\n\n"
-    "👉 2. VENTANA DE CÁLCULO (Segundos):\n"
-    "Establece el periodo de integración a partir del t0. Este parámetro es crítico, "
-    "ya que el programa calcula matemáticamente la Energía Disipada (Julios) multiplicando "
-    "la Potencia Media de esta franja por el tiempo de cálculo especificado.\n\n"
-    "👉 3. FILTRADO ESTADÍSTICO DE RUIDO:\n"
-    "Las métricas de Media, Mediana y Mínimo pueden verse falseadas por el ruido "
-    "instrumental del equipo o periodos de inactividad a 0W. El filtro opcional permite "
-    "purgar estos valores para que la estadística refleje únicamente el consumo real.\n\n"
-    "Haz clic en Aceptar para importar el registro .CSV."
+    "Esta herramienta procesará los datos del vatímetro de forma global, "
+    "generando un resumen estadístico, gráficas analíticas y clasificación de potencia.\n\n"
+    "📚 INSTRUCCIONES:\n"
+    "1. Selecciona uno o varios archivos .CSV.\n"
+    "2. Indica si deseas filtrar los valores '0' para la estadística.\n"
+    "3. El programa generará un Excel con los resultados de todo el ensayo.\n\n"
+    "Haz clic en Aceptar para comenzar."
 )
 
 # Mostramos la ventana de información ANTES de hacer nada más
@@ -71,21 +63,9 @@ for archivo_csv in archivos_seleccionados:
 
     # ---------------------
 
-        # --- NUEVO: PREGUNTAR UMBRALES Y TIEMPO ---
-    umbral_1 = simpledialog.askfloat("Umbral", f"Archivo: {nombre_base}\nUmbral de potencia (W) para Elemento 1:", parent=root, minvalue=0.0)
-    umbral_2 = simpledialog.askfloat("Umbral", f"Archivo: {nombre_base}\nUmbral de potencia (W) para Elemento 2:", parent=root, minvalue=0.0)
-    umbral_3 = simpledialog.askfloat("Umbral", f"Archivo: {nombre_base}\nUmbral de potencia (W) para Elemento 3:", parent=root, minvalue=0.0)
-    tiempo_calc = simpledialog.askfloat("Tiempo", f"Archivo: {nombre_base}\nTiempo para el cálculo en segundos:", parent=root, minvalue=0.0)
-    
-    # Si el usuario cierra alguna ventana o le da a cancelar
-    if None in (umbral_1, umbral_2, umbral_3, tiempo_calc):
-        print("Operación cancelada para {nombre_base}. ")
-        continue
-
     #preguntar si se ignoran los ceros
     ignorar_ceros = messagebox.askyesno("Filtro de Ceros", f"Archivo: {nombre_base}\n\n¿Deseas IGNORAR los valores '0' para que no alteren la Media, Mediana y Mínimo?\n\n(Sí = Filtrar los ceros / No = Tenerlos en cuenta)")
 
-    umbrales = {1: umbral_1, 2: umbral_2, 3: umbral_3}
     # ----------------------------------------
 
     print(f"Leyendo el archivo: {archivo_csv}...")
@@ -153,87 +133,42 @@ for archivo_csv in archivos_seleccionados:
         stats_max = {"Parámetro": f"Elemento {i}"}
         stats_min = {"Parámetro": f"Elemento {i}"}
         stats_mean = {"Parámetro": f"Elemento {i}"}
-        stats_median = {"Parámetro": f"Elemento {i}"} # <--- NUEVO
+        stats_median = {"Parámetro": f"Elemento {i}"} 
         
-        col_potencia = f"P-E{i}"
+        # Como ya no hay umbrales ni recortes de tiempo, 
+        # el inicio y el fin son el primer y último dato del archivo.
         start_idx = df.index[0] if not df.empty else 0 
+        end_idx = df.index[-1] if not df.empty else 0
         
-        if col_potencia in df.columns:
-            vals_potencia = pd.to_numeric(df[col_potencia], errors='coerce').abs()
-            
-            # --- NUEVO ESCUDO: IGNORAR LOS 0W INICIALES AL BUSCAR EL UMBRAL ---
-            # Le decimos que busque valores menores al umbral, pero EXIGIENDO que 
-            # sean mayores a 0.0001W. Así evitamos que empiece el ensayo en un 0W
-            # de cuando la máquina estaba apagada.
-            validos = vals_potencia[(vals_potencia < umbrales[i]) & (vals_potencia > 0.0001)]
-            
-            if not validos.empty:
-                start_idx = validos.index[0] 
-            # ------------------------------------------------------------------
-                
-        end_idx = start_idx
-        if tiempos is not None and pd.notna(tiempos.loc[start_idx]):
-            t_inicio = tiempos.loc[start_idx]
-            dif_segundos = (tiempos.loc[start_idx:] - t_inicio).dt.total_seconds()
-            dif_segundos = dif_segundos.apply(lambda x: x + 86400 if x < 0 else x)
-            dentro_del_tiempo = dif_segundos[dif_segundos <= tiempo_calc]
-            
-            if not dentro_del_tiempo.empty:
-                end_idx = dentro_del_tiempo.index[-1] 
-            
-            if dif_segundos.max() < (tiempo_calc - 1):
-                # En lugar de mostrar la ventana aquí, lo guardamos en la lista
-                avisos_falta_datos.append(f"- Elemento {i}: Se apagó a los {round(dif_segundos.max(), 1)}s")
-        else:
-            end_idx = start_idx + int(tiempo_calc) - 1
-            if end_idx > df.index[-1]: end_idx = df.index[-1]
-            
+        # Guardamos esto por si luego lo necesitas para colorear Excel
         franjas_indices[i] = (start_idx, end_idx) 
         
         for metric_name, col_name in cols.items():
             if col_name in df.columns:
                 vals = pd.to_numeric(df[col_name], errors='coerce').abs()
-                vals_finales = vals.loc[start_idx:end_idx] 
                 
                 # --- NUEVO: SI EL USUARIO DIJO "SÍ", VOLVEMOS INVISIBLES LOS CEROS ---
                 if ignorar_ceros:
                     # Volvemos a ignorar el ruido microscópico (valores menores a 0.0001)
                     vals[vals < 0.0001] = np.nan
-                    vals_finales[vals_finales < 0.0001] = np.nan
                 # ---------------------------------------------------------------------
 
                 stats_max[metric_name] = round(vals.max(), 4)
-                stats_min[metric_name] = round(vals.min(),4)
-                stats_mean[metric_name] = round(vals_finales.mean(), 4)
-                stats_median[metric_name] = round(vals.median(), 4) # <--- NUEVO
+                stats_min[metric_name] = round(vals.min(), 4)
+                stats_mean[metric_name] = round(vals.mean(), 4)
+                stats_median[metric_name] = round(vals.median(), 4) 
             else:
                 stats_max[metric_name] = "No detectado"
                 stats_min[metric_name] = "No detectado"
                 stats_mean[metric_name] = "No detectado"
-                stats_median[metric_name] = "No detectado" # <--- NUEVO
+                stats_median[metric_name] = "No detectado" 
                 
-        if col_potencia in df.columns:
-            vals_pot_franja = vals_potencia.loc[start_idx:end_idx]
-            stats_max["Energía Disipada (J)"] = "N/A"
-            stats_min["Energía Disipada (J)"] = "N/A"
-            stats_median["Energía Disipada (J)"] = "N/A" # <--- NUEVO
-            stats_mean["Energía Disipada (J)"] = round(vals_pot_franja.mean() * tiempo_calc, 4)
-        else:
-            stats_max["Energía Disipada (J)"] = "No detectado"
-            stats_min["Energía Disipada (J)"] = "No detectado"
-            stats_median["Energía Disipada (J)"] = "No detectado" # <--- NUEVO
-            stats_mean["Energía Disipada (J)"] = "No detectado"
-                
+        # Guardamos las estadísticas limpias en las listas (Sin la Energía Disipada)
         summary_max_data.append(stats_max)
         summary_min_data.append(stats_min)
         summary_mean_data.append(stats_mean)
-        summary_median_data.append(stats_median) # <--- NUEVO
-
-    # --- NUEVO: MOSTRAR UN SOLO AVISO SI FALTARON DATOS ---
-    if avisos_falta_datos:
-        mensaje = f"Has pedido un ensayo de {tiempo_calc}s, pero faltan datos en el archivo {nombre_base}:\n\n" + "\n".join(avisos_falta_datos)
-        messagebox.showwarning("¡Atención: Faltan datos!", mensaje)
-    # -----------------------------------------------------
+        summary_median_data.append(stats_median) 
+ # -----------------------------------------------------
 
     df_max = pd.DataFrame(summary_max_data).set_index("Parámetro").T
     df_min = pd.DataFrame(summary_min_data).set_index("Parámetro").T
@@ -350,32 +285,7 @@ for archivo_csv in archivos_seleccionados:
     ws_datos = wb.create_sheet(title="Datos Registro")
     escribir_tabla(ws_datos, df, 1, 1, None, color_hex="A5CED6")
     
-    # --- NUEVO: COLOREAR LA FRANJA DE DATOS VÁLIDOS ---
-    color_franja = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid") # Verde clarito
     
-    # 1. Identificar a qué elemento pertenece cada columna de Excel
-    cols_elemento = {1: [], 2: [], 3: []}
-    for c in range(1, ws_datos.max_column + 1):
-        val = ws_datos.cell(row=1, column=c).value
-        if val and isinstance(val, str):
-            if "-E1" in val: cols_elemento[1].append(c)
-            elif "-E2" in val: cols_elemento[2].append(c)
-            elif "-E3" in val: cols_elemento[3].append(c)
-
-    # 2. Pintar las celdas EXTREMADAMENTE exactas de la franja de tiempo
-    for num_elemento, franja in franjas_indices.items():
-        s_idx, e_idx = franja
-        
-        # En Excel la fila 1 es la cabecera, así que el dato 0 es la fila 2
-        fila_inicio = s_idx + 2 
-        fila_fin = e_idx + 2
-        
-        # Le ponemos un tope para que no intente pintar fuera del documento si hay algún error
-        fila_fin = min(fila_fin, ws_datos.max_row)
-        
-        for r in range(fila_inicio, fila_fin + 1):
-            for c_idx in cols_elemento[num_elemento]:
-                ws_datos.cell(row=r, column=c_idx).fill = color_franja
     # --------------------------------------------------
          
     # Ajustar el ancho de las columnas
@@ -385,7 +295,7 @@ for archivo_csv in archivos_seleccionados:
             column = col[0].column_letter
             for cell in col:
                 
-                # --- NUEVO: Ignoramos la celda de la nota larga (Fila 7, Columna 5) al medir
+                # Ignoramos la celda de la nota larga (Fila 7, Columna 5) al medir
                 if ws.title == "Resumen" and cell.row == 7 and cell.column == 5:
                     continue
                     
@@ -403,7 +313,7 @@ for archivo_csv in archivos_seleccionados:
             
             ws.column_dimensions[column].width = min(max_length + 3, 40)
 
-    # --- NUEVO: CREAR PESTAÑA DE GRÁFICAS ---
+    # --- PESTAÑA DE GRÁFICAS ---
     ws_graficas = wb.create_sheet(title="Gráficas")
 
     # 1. Buscar en qué columna exacta de Excel cayó el Tiempo y las Potencias
@@ -427,8 +337,7 @@ for archivo_csv in archivos_seleccionados:
             chart.scatterStyle = 'line' 
             chart.title = f"Potencia Activa P (W) - Elemento {i}"
             
-            # --- NUEVO: HACEMOS EL TÍTULO MÁS GRANDE ---
-            # sz=1400 es tamaño 14, b=True es Negrita
+            # Título
             chart.title.tx.rich.p[0].pPr.defRPr = CharacterProperties(sz=1400, b=True) 
             
             # Tamaño de la gráfica
@@ -456,7 +365,6 @@ for archivo_csv in archivos_seleccionados:
             chart.x_axis.tickLblPos = "nextTo" 
             chart.y_axis.tickLblPos = "nextTo" 
 
-            # --- EL TRUCO INFALIBLE: ALEJAR TEXTOS CON SALTOS DE LÍNEA ---
             # Los \n son "Intros". Obligan a Excel a crear espacio vacío.
             chart.x_axis.title = "\n\nTiempo" 
             chart.y_axis.title = "Potencia (W)\n\n\n" 
@@ -476,7 +384,7 @@ for archivo_csv in archivos_seleccionados:
                 
             chart.legend = None 
             
-            # Línea Azul Profesional
+            # Línea Azul 
             serie.marker.symbol = "none" 
             serie.graphicalProperties.line.solidFill = "0070C0" 
             serie.graphicalProperties.line.width = 20000 
@@ -487,7 +395,86 @@ for archivo_csv in archivos_seleccionados:
             
             fila_destino += 22 
     # ----------------------------------------
+
+    # --- NUEVO: PESTAÑA INTERACTIVA DE ENERGÍA DISIPADA ---
+    ws_energia = wb.create_sheet(title="Energía Disipada")
+    
+    # Estilos para esta hoja
+    fill_input = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid") # Celdas amarillas
+    fill_header_en = PatternFill(start_color="4F81BD", end_color="4F81BD", fill_type="solid")
+    font_white = Font(bold=True, color="FFFFFF")
+    
+    # Título principal
+    ws_energia.cell(row=2, column=2, value="CÁLCULO DINÁMICO DE ENERGÍA").font = Font(bold=True, size=14)
+    ws_energia.cell(row=3, column=2, value="Instrucciones: Revisa las gráficas y escribe tus parámetros en las celdas amarillas.")
+    ws_energia.cell(row=4, column=2, value="*Nota: El 'Umbral' es el gatillo. El tiempo empezará a contar en el primer valor que caiga por debajo del umbral (ignorando si la máquina estaba a 0W).").font = Font(italic=True, color="595959")
+
+    # Encabezados de los elementos
+    headers_en = ["Parámetro", "Elemento 1", "Elemento 2", "Elemento 3"]
+    for c_idx, h in enumerate(headers_en, start=2):
+        celda = ws_energia.cell(row=6, column=c_idx, value=h)
+        celda.fill = fill_header_en
+        celda.font = font_white
+        celda.alignment = align_center
+        celda.border = borde_fino
+        
+    # Nombres de las filas
+    labels_en = ["Umbral de Disparo (W)", "Tiempo de Ensayo (s)", "ENERGÍA DISIPADA (J)"]
+    for r_idx, label in enumerate(labels_en, start=7):
+        celda = ws_energia.cell(row=r_idx, column=2, value=label)
+        celda.font = Font(bold=True)
+        celda.border = borde_fino
+
+    # Crear las casillas para cada elemento
+    for i in [1, 2, 3]:
+        col_excel = i + 2 # Caerán en las columnas C, D y E
+        
+        # 1. Casillas amarillas (Inputs del usuario)
+        c_umbral = ws_energia.cell(row=7, column=col_excel, value=0.0) # 15W por defecto
+        c_tiempo = ws_energia.cell(row=8, column=col_excel, value=60.0) # 60s por defecto
+        
+        c_umbral.fill = fill_input
+        c_umbral.border = borde_fino
+        c_tiempo.fill = fill_input
+        c_tiempo.border = borde_fino
+        
+        # 2. Casilla de Resultado (La fórmula maestra)
+        c_resultado = ws_energia.cell(row=9, column=col_excel)
+        c_resultado.border = borde_fino
+        c_resultado.font = Font(bold=True, color="0070C0")
+        
+        # Si el elemento existe y tiene columna de potencia...
+        if cols_potencia.get(i) is not None:
+            # Averiguamos en qué letra cayó la potencia (ej: 'C', 'L', 'U')
+            letra_p = get_column_letter(cols_potencia[i])
+            ref_u = c_umbral.coordinate # Ej: 'C6'
+            ref_t = c_tiempo.coordinate # Ej: 'C7'
             
+            # FÓRMULA MÁGICA DE EXCEL:
+            # 1. MATCH + INDEX: Busca la primera fila donde Potencia < Umbral Y Potencia > 0.0001
+            # 2. OFFSET: Se sitúa en esa fila y selecciona hacia abajo tantos segundos como diga el usuario.
+            # 3. AVERAGE: Calcula la media de ese trozo exacto.
+            # 4. Multiplica por los segundos para sacar los Julios.
+            # FÓRMULA MÁGICA MEJORADA (Con Valor Absoluto para lecturas negativas)
+            formula = (
+                f"=IFERROR(ABS(AVERAGE(OFFSET('Datos Registro'!{letra_p}1, "
+                f"MATCH(1, INDEX((ABS('Datos Registro'!{letra_p}2:{letra_p}100000)<{ref_u})*(ABS('Datos Registro'!{letra_p}2:{letra_p}100000)>0.0001), 0, 1), 0), "
+                f"0, {ref_t}, 1))) * {ref_t}, \"Sin datos\")"
+            )
+            
+            c_resultado.value = formula
+            c_resultado.number_format = '0.00'
+        else:
+            c_resultado.value = "N/A"
+            c_resultado.alignment = align_center
+
+    # Ajustar el ancho para que se lea todo bien
+    ws_energia.column_dimensions['B'].width = 25
+    ws_energia.column_dimensions['C'].width = 15
+    ws_energia.column_dimensions['D'].width = 15
+    ws_energia.column_dimensions['E'].width = 15
+    # ----------------------------------------------------
+
     # Guardar
     wb.save(archivo_excel)
     print(f"¡Listo! Se ha guardado el archivo bonito como: {archivo_excel}")
